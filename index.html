@@ -205,7 +205,7 @@
   // Load CSV, create markers, and wire UI
   async function loadAndBuild() {
     try {
-      const text = await fetch(CSV_URL).then(r=>r.text());
+      const text = await fetch(CSV_URL, { cache: "no-store" }).then(r => r.text());
       const parsed = Papa.parse(text, {header:true, skipEmptyLines:true});
       allData = parsed.data;
       // attach row index for linking back to markers
