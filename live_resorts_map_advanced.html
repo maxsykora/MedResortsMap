@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Live Resorts Map — Advanced</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+  <style>
+    :root{--accent:#1f6feb;--muted:#666;}
+    html,body,#map{height:100%;margin:0;padding:0;font-family:Inter,Arial,Helvetica,sans-serif}
+    #map{position:absolute;left:320px;top:0;right:0;bottom:0}
+    #sidebar{position:absolute;left:0;top:0;bottom:0;width:320px;background:#fff;border-right:1px solid #eee;overflow:auto;box-shadow:2px 0 8px rgba(0,0,0,0.04);padding:12px}
+    .logo{font-weight:700;color:var(--accent);margin-bottom:8px;font-size:18px}
+    .controls{margin-bottom:10px}
+    .controls label{display:block;font-size:12px;color:var(--muted);margin-top:8px}
+    select,input[type="text"],input[type="number"]{width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box}
+    .list{margin-top:10px}
+    .item{display:flex;gap:8px;padding:8px;border-radius:8px;border:1px solid #f0f0f0;margin-bottom:8px;cursor:pointer;align-items:center}
+    .item img{width:64px;height:44px;object-fit:cover;border-radius:6px;flex:0 0 64px}
+    .item .meta{flex:1}
+    .item .meta h4{margin:0;font-size:14px}
+    .item .meta p{margin:4px 0 0 0;font-size:12px;color:#666}
+    .clear{background:#fff;border:1px solid #ddd;padding:6px;border-radius:6px;cursor:pointer;margin-top:8px}
+    .footer{font-size:12px;color:#888;margin-top:12px}
+    .no-results{padding:16px;color:#777}
+    /* popup image */
+    .popup-img{width:260px;height:140px;object-fit:cover;border-radius:6px;margin-bottom:6px;display:block}
+    /* small responsive */
+    @media(max-width:900px){#sidebar{position:relative;width:100%;height:280px}#map{left:0;top:280px}}
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <div class="logo">Live Resorts Map — Advanced</div>
+    <div class="controls">
+      <label>Search</label>
+      <input id="search" type="text" placeholder="Type to search name, location, features..." />
+
+      <label>Country</label>
+      <select id="countryFilter"><option value="">Show all</option></select>
+
+      <label>Operator</label>
+      <select id="operatorFilter"><option value="">Show all</option></select>
+
+      <label>Keys (min)</label>
+      <input id="keysFilter" type="number" placeholder="e.g. 100" />
+
+      <label>ADR max (numeric)</label>
+      <input id="adrFilter" type="number" placeholder="e.g. 800" />
+
+      <button id="reset" class="clear">Reset filters</button>
+    </div>
+    <div id="list" class="list"></div>
+    <div class="footer">Data updates live from your Google Sheet. Add a column named <code>Thumbnail</code> with direct image URLs to show photos.</div>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+  <script>
+  // ------------------ CONFIG ------------------
+  const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vS5ye0ZtF-s77jD_6TPLobVBTA1gBakNEah_twwscSwqvDi6Wh7oNWF48b8kQbuauoDq76S0myMVs7F/pub?output=csv";
+  const REFRESH_MS = 20000; // autosync interval
+  // --------------------------------------------
+  // Create map
+  const map = L.map('map').setView([41.0, 12.0], 5);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
+
+  // Marker cluster group
+  const markers = L.markerClusterGroup({chunkedLoading:true});
+
+  // Storage
+  let allData = []; // parsed CSV rows
+  let markerIndex = []; // {id, marker, row}
+
+  // Helpers
+  function parseCoords(c) {
+    if(!c) return null;
+    const parts = c.toString().split(',');
+    if(parts.length < 2) return null;
+    const lat = parseFloat(parts[0].trim());
+    const lng = parseFloat(parts[1].trim());
+    if(isNaN(lat) || isNaN(lng)) return null;
+    return [lat, lng];
+  }
+
+  function sanitize(s){ return (s||'').toString(); }
+
+  // Build popup HTML for a resort row
+  function makePopupHTML(row) {
+    const thumb = sanitize(row.Thumbnail);
+    const img = thumb ? `<img class="popup-img" src="${thumb}" alt="thumb" onerror="this.style.display='none'">` : '';
+    const sourceLink = sanitize(row.Sources) ? `<p><a href="${row.Sources}" target="_blank" rel="noopener">Website / Source</a></p>` : '';
+    return `
+      ${img}
+      <div style="max-width:280px">
+      <h3 style="margin:0 0 6px 0">${sanitize(row.Name)}</h3>
+      <p style="margin:4px 0"><strong>Country:</strong> ${sanitize(row.Country)} — <strong>Location:</strong> ${sanitize(row.Location)}</p>
+      <p style="margin:4px 0"><strong>Size (ha):</strong> ${sanitize(row['Size (ha)']||'')} &nbsp; <strong>Keys:</strong> ${sanitize(row.Keys)}</p>
+      <p style="margin:4px 0"><strong>Operator:</strong> ${sanitize(row['Operator group'])}</p>
+      <p style="margin:4px 0"><strong>ADR:</strong> ${sanitize(row.ADR)}</p>
+      <p style="margin:4px 0"><strong>Amenities:</strong> ${sanitize(row.Amenities)}</p>
+      <p style="margin:4px 0"><strong>Jobs:</strong> ${sanitize(row['Jobs created']||row['Jobs created / Employees (found)']||'')}</p>
+      ${sourceLink}
+      </div>
+    `;
+  }
+
+  // Create a marker for a row
+  function createMarker(row) {
+    const coords = parseCoords(row.Coordinates);
+    if(!coords) return null;
+    const marker = L.marker(coords, {title: row.Name || ''});
+
+    const popupContent = makePopupHTML(row);
+    marker.bindPopup(popupContent, {maxWidth:320});
+
+    // open popup on hover (mouseover) and close on mouseout for quick preview
+    marker.on('mouseover', function(e){ this.openPopup(); });
+    marker.on('mouseout', function(e){ this.closePopup(); });
+
+    return marker;
+  }
+
+  // Populate filters (unique values)
+  function populateFilters(data) {
+    const countrySel = document.getElementById('countryFilter');
+    const operatorSel = document.getElementById('operatorFilter');
+    const countries = new Set(); const operators = new Set();
+    data.forEach(r => { if(r.Country) countries.add(r.Country); if(r['Operator group']) operators.add(r['Operator group']); });
+    // reset
+    countrySel.innerHTML = '<option value="">Show all</option>';
+    operatorSel.innerHTML = '<option value="">Show all</option>';
+    Array.from(countries).sort().forEach(c => {
+      const o = document.createElement('option'); o.value = c; o.textContent = c; countrySel.appendChild(o);
+    });
+    Array.from(operators).sort().forEach(c => {
+      const o = document.createElement('option'); o.value = c; o.textContent = c; operatorSel.appendChild(o);
+    });
+  }
+
+  // Build sidebar list of visible rows
+  function rebuildList(visibleRows) {
+    const list = document.getElementById('list');
+    list.innerHTML = '';
+    if(visibleRows.length === 0) { list.innerHTML = '<div class="no-results">No resorts match the filters.</div>'; return; }
+    visibleRows.forEach((r, idx) => {
+      const div = document.createElement('div'); div.className = 'item';
+      const img = document.createElement('img'); img.src = r.Thumbnail || ''; img.onerror = ()=>{img.style.display='none'};
+      const meta = document.createElement('div'); meta.className='meta';
+      const h = document.createElement('h4'); h.textContent = r.Name || ''; const p = document.createElement('p'); p.textContent = (r.Country? r.Country + ' — ':'') + (r.Location||'');
+      meta.appendChild(h); meta.appendChild(p);
+      div.appendChild(img); div.appendChild(meta);
+      div.addEventListener('click', ()=>{
+        // find corresponding marker and pan to it
+        const found = markerIndex.find(m=>m.rowIndex === r._rowIndex);
+        if(found){ map.setView(found.marker.getLatLng(), 13); found.marker.openPopup(); }
+      });
+      list.appendChild(div);
+    });
+  }
+
+  // Apply filters and update map
+  function applyFilters() {
+    const q = (document.getElementById('search').value||'').toLowerCase();
+    const country = document.getElementById('countryFilter').value;
+    const operator = document.getElementById('operatorFilter').value;
+    const minKeys = parseInt(document.getElementById('keysFilter').value) || 0;
+    const maxAdr = parseFloat(document.getElementById('adrFilter').value);
+    // determine visible rows
+    const visible = [];
+    markerIndex.forEach(entry => {
+      const r = entry.row;
+      // text filter across several fields
+      const text = (r.Name+' '+r.Location+' '+r.Amenities+' '+r['Notable features']).toLowerCase();
+      if(q && !text.includes(q)) { entry.visible=false; return; }
+      if(country && r.Country !== country) { entry.visible=false; return; }
+      if(operator && r['Operator group'] !== operator) { entry.visible=false; return; }
+      const keysNum = parseInt((r.Keys||'').toString().replace(/[^0-9]/g,'')) || 0;
+      if(keysNum < minKeys) { entry.visible=false; return; }
+      if(!isNaN(maxAdr) && r.ADR) {
+        const adrNum = parseFloat((r.ADR||'').toString().replace(/[^\d\.]/g,''));
+        if(!isNaN(adrNum) && adrNum > maxAdr) { entry.visible=false; return; }
+      }
+      entry.visible=true;
+      visible.push(r);
+    });
+    // update cluster layer
+    markers.clearLayers();
+    markerIndex.forEach(e=>{ if(e.visible) markers.addLayer(e.marker); });
+    // fit bounds if any visible
+    const visibleMarkers = markerIndex.filter(e=>e.visible).map(e=>e.marker);
+    if(visibleMarkers.length>0){
+      const group = L.featureGroup(visibleMarkers);
+      map.fitBounds(group.getBounds().pad(0.15));
+    }
+    // rebuild list
+    rebuildList(visible);
+  }
+
+  // Load CSV, create markers, and wire UI
+  async function loadAndBuild() {
+    try {
+      const text = await fetch(CSV_URL).then(r=>r.text());
+      const parsed = Papa.parse(text, {header:true, skipEmptyLines:true});
+      allData = parsed.data;
+      // attach row index for linking back to markers
+      markerIndex = [];
+      markers.clearLayers();
+      allData.forEach((row, i) => {
+        row._rowIndex = i;
+        const m = createMarker(row);
+        if(m){ markerIndex.push({rowIndex:i, marker:m, row:row, visible:true}); markers.addLayer(m); }
+      });
+      map.addLayer(markers);
+      populateFilters(allData);
+      rebuildList(allData);
+      applyFilters(); // initial
+    } catch(err) {
+      console.error('Failed to load CSV:', err);
+      document.getElementById('list').innerHTML = '<div class="no-results">Could not load data — check CSV URL and CORS/publishing settings.</div>';
+    }
+  }
+
+  // UI wiring
+  document.getElementById('search').addEventListener('input', applyFilters);
+  document.getElementById('countryFilter').addEventListener('change', applyFilters);
+  document.getElementById('operatorFilter').addEventListener('change', applyFilters);
+  document.getElementById('keysFilter').addEventListener('input', applyFilters);
+  document.getElementById('adrFilter').addEventListener('input', applyFilters);
+  document.getElementById('reset').addEventListener('click', ()=>{ document.getElementById('search').value=''; document.getElementById('countryFilter').value=''; document.getElementById('operatorFilter').value=''; document.getElementById('keysFilter').value=''; document.getElementById('adrFilter').value=''; applyFilters(); });
+
+  // Auto-refresh loop (rebuilds markers/data)
+  async function periodicRefresh(){
+    await loadAndBuild();
+    setTimeout(periodicRefresh, REFRESH_MS);
+  }
+
+  // initial load
+  periodicRefresh();
+  </script>
+</body>
+</html>
